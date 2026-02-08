@@ -25,7 +25,7 @@ The simulation progresses through three distinct phases:
 1. Install Python 3.8 or higher.
 2. Install the required dependencies:
    ```bash
-   pip install numpy matplotlib numba
+   pip install numpy matplotlib numba scipy
    ```
 
 ## Usage
@@ -33,7 +33,7 @@ The simulation progresses through three distinct phases:
 Run the simulation script directly:
 
 ```bash
-python simulation.py
+python main.py
 ```
 
 ## Controls
