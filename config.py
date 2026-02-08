@@ -1,0 +1,37 @@
+import numpy as np
+
+# Simulation Parameters
+G_BASE = 0.05
+GAMMA = 5.0 / 3.0
+H = 0.15
+MASS = 2.0
+VISC_ALPHA = 1.0
+VISC_BETA = 2.0
+GRAV_SOFTENING = 0.05
+DAMP_FACTOR = 0.95
+MIN_TEMP = 0.01
+
+# Equation of State (Neutron Star)
+NUCLEAR_DENSITY = 25.0
+DEGENERACY_COEFF = 100.0
+DEGENERACY_EXP = 3.0
+
+# Simulation Settings
+N_PARTICLES = 1800
+DT_MAX = 0.004
+CFL_FACTOR = 0.2
+
+# Grid Optimization
+GRID_SIZE = 100
+GRID_CELL = 2.0 * H
+GRID_ORIGIN = -5.0
+
+# Supernova Phase Parameters
+COLLAPSE_GRAVITY_MULT = 60.0
+COLLAPSE_COOL_RATE = 0.96
+COLLAPSE_MIN_DURATION = 0.05
+SUPERNOVA_INJECT_E = 10000.0
+REMNANT_COUNT = 250
+
+# Derived Constant
+SIGMA = 10.0 / (7.0 * np.pi * H * H)
