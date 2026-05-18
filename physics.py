@@ -82,7 +82,7 @@ def compute_gravity(pos, mass_per_particle, G):
         d_pos = cuda.to_device(pos_float32)
         d_acc_grav = cuda.to_device(acc_grav)
 
-        threads_per_block = 256
+        threads_per_block = 64
         blocks_per_grid = (n + (threads_per_block - 1)) // threads_per_block
 
         compute_gravity_cuda_kernel[blocks_per_grid, threads_per_block](
@@ -191,7 +191,7 @@ def compute_density_pressure(pos, u, mass_per_particle, head, next_particle):
         d_rho = cuda.to_device(rho)
         d_pressure = cuda.to_device(pressure)
 
-        threads_per_block = 256
+        threads_per_block = 64
         blocks_per_grid = (n + (threads_per_block - 1)) // threads_per_block
 
         compute_density_pressure_cuda_kernel[blocks_per_grid, threads_per_block](
@@ -335,7 +335,7 @@ def compute_sph_forces(pos, vel, rho, pressure, mass_per_particle, head, next_pa
         d_acc_sph = cuda.to_device(acc_sph)
         d_du_dt = cuda.to_device(du_dt)
 
-        threads_per_block = 256
+        threads_per_block = 64
         blocks_per_grid = (n + (threads_per_block - 1)) // threads_per_block
 
         compute_sph_forces_cuda_kernel[blocks_per_grid, threads_per_block](
