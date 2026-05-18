@@ -20,6 +20,13 @@ The simulation progresses through three distinct phases:
 * **Matplotlib:** Real-time visualization and animation.
 * **Numba:** Just-in-Time (JIT) compilation to accelerate calculation loops (gravity, density, pressure).
 
+## CUDA Support
+This project supports CUDA for GPU acceleration.
+
+### Requirements
+* **Hardware:** NVIDIA GPU
+* **Software:** CUDA Toolkit
+
 ## Installation
 
 1. Install Python 3.8 or higher.
@@ -35,6 +42,11 @@ Run the simulation script directly:
 ```bash
 python main.py
 ```
+
+## Recommended Settings
+For optimal performance, it is recommended to adjust the `N_PARTICLES` variable in `config.py`:
+* **Without CUDA:** Set `N_PARTICLES` to a value less than `1500`.
+* **With CUDA:** Set `N_PARTICLES` to `4000`-`8000`, depending on performance and simulation speed.
 
 ## Controls
 * **SPACE:** Initiate Core Collapse
