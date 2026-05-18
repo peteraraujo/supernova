@@ -1,7 +1,8 @@
 import numpy as np
 from numba import njit, prange, cuda
 import config as cfg
-from kernels import kernel_w, kernel_grad_w
+from kernels import kernel_w, kernel_grad_w, kernel_w_cuda, kernel_grad_w_cuda
+import math
 
 # CUDA support
 USE_CUDA = cuda.is_available()
@@ -93,8 +94,48 @@ def compute_gravity(pos, mass_per_particle, G):
     else:
         return compute_gravity_jit(pos, mass_per_particle, G)
 
+@cuda.jit(fastmath=True)
+def compute_density_pressure_cuda_kernel(pos, u, mass_per_particle, head, next_particle, rho, pressure):
+    i = cuda.grid(1)
+    n = pos.shape[0]
+    if i >= n:
+        return
+
+    h2_support = (2.0 * cfg.H) ** 2
+    cx_i = int((pos[i, 0] - cfg.GRID_ORIGIN) / cfg.GRID_CELL)
+    cy_i = int((pos[i, 1] - cfg.GRID_ORIGIN) / cfg.GRID_CELL)
+    rho_val = 0.0
+
+    for off_x in range(-1, 2):
+        for off_y in range(-1, 2):
+            nx = cx_i + off_x
+            ny = cy_i + off_y
+
+            if 0 <= nx < cfg.GRID_SIZE and 0 <= ny < cfg.GRID_SIZE:
+                cell_idx = nx + ny * cfg.GRID_SIZE
+                j = head[cell_idx]
+                while j != -1:
+                    dx = pos[i, 0] - pos[j, 0]
+                    dy = pos[i, 1] - pos[j, 1]
+                    r2 = dx * dx + dy * dy
+                    if r2 < h2_support:
+                        rho_val += mass_per_particle * kernel_w_cuda(math.sqrt(r2), cfg.H)
+                    j = next_particle[j]
+
+    if rho_val < 1e-5:
+        rho_val = 1e-5
+    rho[i] = rho_val
+
+    p_ideal = (cfg.GAMMA - 1.0) * rho_val * u[i]
+    p_degen = 0.0
+    if rho_val > cfg.NUCLEAR_DENSITY:
+        excess = rho_val - cfg.NUCLEAR_DENSITY
+        p_degen = cfg.DEGENERACY_COEFF * (excess ** cfg.DEGENERACY_EXP)
+
+    pressure[i] = p_ideal + p_degen
+
 @njit(parallel=True, fastmath=True)
-def compute_density_pressure(pos, u, mass_per_particle, head, next_particle):
+def compute_density_pressure_jit(pos, u, mass_per_particle, head, next_particle):
     n = len(pos)
     rho = np.zeros(n)
     pressure = np.zeros(n)
@@ -135,8 +176,92 @@ def compute_density_pressure(pos, u, mass_per_particle, head, next_particle):
 
     return rho, pressure
 
+def compute_density_pressure(pos, u, mass_per_particle, head, next_particle):
+    if USE_CUDA:
+        n = len(pos)
+        rho = np.zeros(n, dtype=np.float32)
+        pressure = np.zeros(n, dtype=np.float32)
+        pos_float32 = pos.astype(np.float32)
+        u_float32 = u.astype(np.float32)
+
+        d_pos = cuda.to_device(pos_float32)
+        d_u = cuda.to_device(u_float32)
+        d_head = cuda.to_device(head)
+        d_next_particle = cuda.to_device(next_particle)
+        d_rho = cuda.to_device(rho)
+        d_pressure = cuda.to_device(pressure)
+
+        threads_per_block = 256
+        blocks_per_grid = (n + (threads_per_block - 1)) // threads_per_block
+
+        compute_density_pressure_cuda_kernel[blocks_per_grid, threads_per_block](
+            d_pos, d_u, mass_per_particle, d_head, d_next_particle, d_rho, d_pressure
+        )
+
+        d_rho.copy_to_host(rho)
+        d_pressure.copy_to_host(pressure)
+        return rho, pressure
+    else:
+        return compute_density_pressure_jit(pos, u, mass_per_particle, head, next_particle)
+
+@cuda.jit(fastmath=True)
+def compute_sph_forces_cuda_kernel(pos, vel, rho, pressure, mass_per_particle, head, next_particle, acc_sph, du_dt):
+    i = cuda.grid(1)
+    n = pos.shape[0]
+    if i >= n:
+        return
+
+    h2_support = (2.0 * cfg.H) ** 2
+    cx_i = int((pos[i, 0] - cfg.GRID_ORIGIN) / cfg.GRID_CELL)
+    cy_i = int((pos[i, 1] - cfg.GRID_ORIGIN) / cfg.GRID_CELL)
+
+    for off_x in range(-1, 2):
+        for off_y in range(-1, 2):
+            nx = cx_i + off_x
+            ny = cy_i + off_y
+
+            if 0 <= nx < cfg.GRID_SIZE and 0 <= ny < cfg.GRID_SIZE:
+                cell_idx = nx + ny * cfg.GRID_SIZE
+                j = head[cell_idx]
+                while j != -1:
+                    if i == j:
+                        j = next_particle[j]
+                        continue
+
+                    dx = pos[i, 0] - pos[j, 0]
+                    dy = pos[i, 1] - pos[j, 1]
+                    r2 = dx * dx + dy * dy
+
+                    if 1e-12 < r2 < h2_support:
+                        r = math.sqrt(r2)
+                        grad_w_x, grad_w_y = kernel_grad_w_cuda(dx, dy, r, cfg.H)
+
+                        v_ij_x = vel[i, 0] - vel[j, 0]
+                        v_ij_y = vel[i, 1] - vel[j, 1]
+                        v_dot_r = v_ij_x * dx + v_ij_y * dy
+
+                        visc_term = 0.0
+                        if v_dot_r < 0:
+                            mu = cfg.H * v_dot_r / (r2 + 0.01 * cfg.H ** 2)
+                            c_i = math.sqrt(cfg.GAMMA * pressure[i] / rho[i])
+                            c_j = math.sqrt(cfg.GAMMA * pressure[j] / rho[j])
+                            c_sound = 0.5 * (c_i + c_j)
+                            rho_bar = 0.5 * (rho[i] + rho[j])
+                            visc_term = (-cfg.VISC_ALPHA * c_sound * mu + cfg.VISC_BETA * mu ** 2) / rho_bar
+
+                        p_term = (pressure[i] / (rho[i] ** 2) + pressure[j] / (rho[j] ** 2))
+                        total_term = p_term + visc_term
+                        force_x = -mass_per_particle * total_term * grad_w_x
+                        force_y = -mass_per_particle * total_term * grad_w_y
+
+                        cuda.atomic.add(acc_sph, (i, 0), force_x)
+                        cuda.atomic.add(acc_sph, (i, 1), force_y)
+                        cuda.atomic.add(du_dt, i, 0.5 * mass_per_particle * total_term * (v_ij_x * grad_w_x + v_ij_y * grad_w_y))
+
+                    j = next_particle[j]
+
 @njit(parallel=True, fastmath=True)
-def compute_sph_forces(pos, vel, rho, pressure, mass_per_particle, head, next_particle):
+def compute_sph_forces_jit(pos, vel, rho, pressure, mass_per_particle, head, next_particle):
     n = len(pos)
     acc_sph = np.zeros((n, 2))
     du_dt = np.zeros(n)
@@ -190,6 +315,38 @@ def compute_sph_forces(pos, vel, rho, pressure, mass_per_particle, head, next_pa
 
                         j = next_particle[j]
     return acc_sph, du_dt
+
+def compute_sph_forces(pos, vel, rho, pressure, mass_per_particle, head, next_particle):
+    if USE_CUDA:
+        n = len(pos)
+        acc_sph = np.zeros((n, 2), dtype=np.float32)
+        du_dt = np.zeros(n, dtype=np.float32)
+        pos_float32 = pos.astype(np.float32)
+        vel_float32 = vel.astype(np.float32)
+        rho_float32 = rho.astype(np.float32)
+        pressure_float32 = pressure.astype(np.float32)
+
+        d_pos = cuda.to_device(pos_float32)
+        d_vel = cuda.to_device(vel_float32)
+        d_rho = cuda.to_device(rho_float32)
+        d_pressure = cuda.to_device(pressure_float32)
+        d_head = cuda.to_device(head)
+        d_next_particle = cuda.to_device(next_particle)
+        d_acc_sph = cuda.to_device(acc_sph)
+        d_du_dt = cuda.to_device(du_dt)
+
+        threads_per_block = 256
+        blocks_per_grid = (n + (threads_per_block - 1)) // threads_per_block
+
+        compute_sph_forces_cuda_kernel[blocks_per_grid, threads_per_block](
+            d_pos, d_vel, d_rho, d_pressure, mass_per_particle, d_head, d_next_particle, d_acc_sph, d_du_dt
+        )
+
+        d_acc_sph.copy_to_host(acc_sph)
+        d_du_dt.copy_to_host(du_dt)
+        return acc_sph, du_dt
+    else:
+        return compute_sph_forces_jit(pos, vel, rho, pressure, mass_per_particle, head, next_particle)
 
 @njit(fastmath=True)
 def get_dt(rho, pressure, vel):
