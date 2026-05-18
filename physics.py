@@ -1,7 +1,13 @@
 import numpy as np
-from numba import njit, prange
+from numba import njit, prange, cuda
 import config as cfg
 from kernels import kernel_w, kernel_grad_w
+
+# CUDA support
+USE_CUDA = cuda.is_available()
+
+if USE_CUDA:
+    print("Using CUDA")
 
 @njit(fastmath=True)
 def build_grid(pos, head, next_particle):
@@ -18,8 +24,32 @@ def build_grid(pos, head, next_particle):
             next_particle[i] = head[cell_idx]
             head[cell_idx] = i
 
+@cuda.jit(fastmath=True)
+def compute_gravity_cuda_kernel(pos, mass_per_particle, G, acc_grav):
+    i = cuda.grid(1)
+    n = pos.shape[0]
+    if i >= n:
+        return
+
+    soft2 = cfg.GRAV_SOFTENING ** 2
+    ax = 0.0
+    ay = 0.0
+
+    for j in range(n):
+        if i == j:
+            continue
+        dx = pos[j, 0] - pos[i, 0]
+        dy = pos[j, 1] - pos[i, 1]
+        r2 = dx * dx + dy * dy
+        inv_dist3 = 1.0 / ((r2 + soft2) ** 1.5)
+        ax += dx * inv_dist3
+        ay += dy * inv_dist3
+
+    acc_grav[i, 0] = G * mass_per_particle * ax
+    acc_grav[i, 1] = G * mass_per_particle * ay
+
 @njit(parallel=True, fastmath=True)
-def compute_gravity(pos, mass_per_particle, G):
+def compute_gravity_jit(pos, mass_per_particle, G):
     n = len(pos)
     acc_grav = np.zeros((n, 2))
     soft2 = cfg.GRAV_SOFTENING ** 2
@@ -41,6 +71,27 @@ def compute_gravity(pos, mass_per_particle, G):
         acc_grav[i, 1] = G * mass_per_particle * ay
 
     return acc_grav
+
+def compute_gravity(pos, mass_per_particle, G):
+    if USE_CUDA:
+        n = len(pos)
+        acc_grav = np.zeros((n, 2), dtype=np.float32)
+        pos_float32 = pos.astype(np.float32)
+
+        d_pos = cuda.to_device(pos_float32)
+        d_acc_grav = cuda.to_device(acc_grav)
+
+        threads_per_block = 256
+        blocks_per_grid = (n + (threads_per_block - 1)) // threads_per_block
+
+        compute_gravity_cuda_kernel[blocks_per_grid, threads_per_block](
+            d_pos, mass_per_particle, G, d_acc_grav
+        )
+
+        d_acc_grav.copy_to_host(acc_grav)
+        return acc_grav
+    else:
+        return compute_gravity_jit(pos, mass_per_particle, G)
 
 @njit(parallel=True, fastmath=True)
 def compute_density_pressure(pos, u, mass_per_particle, head, next_particle):
